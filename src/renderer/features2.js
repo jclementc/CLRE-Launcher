@@ -190,7 +190,7 @@ function richOverview(g) {
 function gamePanels(g) {
   const cols = myCollections();
   const o = load('launch', g.key, () => api.getLaunchOpts(g.key));
-  const custom = !!g.coverCustom;
+  const custom = Object.keys(g.artCustom || {}).length > 0;
   const hasOpts = o && o !== 'loading' && (o.args || (o.open || []).length || (o.close || []).length);
   return `<section class="panel">
       <h2>Mes collections</h2>
@@ -203,11 +203,118 @@ function gamePanels(g) {
       <div class="btn-col">
         <button type="button" class="btn btn-ghost" data-act="launch-opts" data-id="${g.key}">${ICONS.sliders}Options de lancement</button>
         <button type="button" class="btn btn-ghost" data-act="shortcut" data-id="${g.key}">${ICONS.link}Raccourci sur le Bureau</button>
-        <button type="button" class="btn btn-ghost" data-act="cover" data-id="${g.key}">${ICONS.image}${custom ? 'Changer la jaquette' : 'Jaquette perso'}</button>
-        ${custom ? `<button type="button" class="btn btn-ghost" data-act="cover-reset" data-id="${g.key}">Jaquette d’origine</button>` : ''}
+        <button type="button" class="btn btn-ghost" data-act="rename" data-id="${g.key}">${ICONS.sliders}${g.renamed ? 'Renommé · modifier' : 'Renommer le jeu'}</button>
+        <button type="button" class="btn btn-ghost" data-act="assets" data-id="${g.key}">${ICONS.image}${custom ? 'Visuels personnalisés' : 'Personnaliser les visuels'}</button>
         <button type="button" class="btn btn-ghost" data-act="hide" data-id="${g.key}">${ICONS.eyeOff}${(state.local.hidden || []).includes(g.key) ? 'Ne plus masquer' : 'Masquer ce jeu'}</button>
       </div>
     </section>`;
+}
+
+// ---------- Renommer un jeu ----------
+// Seul le nom affiché change : collections, temps de jeu, sauvegardes et lancement gardent la clé d'origine.
+function openRename(key) {
+  const g = byId(key);
+  const orig = g.originalName || g.name;
+  modal(`<h2>Renommer le jeu</h2><p>Nom d’origine : ${esc(orig)}</p>
+    <label class="field">Nom affiché<input name="name" value="${esc(g.name)}" maxlength="100" autofocus></label>
+    <div class="m-actions">${g.renamed ? '<button type="button" class="btn btn-ghost" data-reset-name>Nom d’origine</button>' : ''}<button type="button" class="btn btn-ghost" data-close>Annuler</button><button type="submit" class="btn btn-light">Enregistrer</button></div>`,
+  (dlg, form) => {
+    const save = async (name, msg) => { try { await api.setName(key, name); dlg.close(); toast(msg); await sync(true); } catch (err) { toast(cleanErr(err)); } };
+    form.onsubmit = (e) => { e.preventDefault(); save(new FormData(form).get('name'), 'Jeu renommé'); };
+    const r = $('[data-reset-name]', dlg);
+    if (r) r.onclick = () => save('', 'Nom d’origine rétabli');
+  });
+}
+
+// ---------- Choix d'un visuel sur SteamGridDB ----------
+// Grille de propositions (les plus populaires d'abord) ; un clic enregistre l'image comme un fichier local.
+async function openSgdbPicker(key, type, page = 0, prev = []) {
+  const g = byId(key);
+  const label = { cover: 'Jaquette', header: 'Bannière', hero: 'Arrière-plan', logo: 'Logo' }[type];
+  const back = () => openAssets(key);
+  const shell = (body, game) => modal(`<h2>${esc(label)} · SteamGridDB</h2><p>${esc(g ? g.name : key)}${game ? ` · trouvé comme « ${esc(game.name)} » <button type="button" class="link-btn" data-sg-wrong>Ce n’est pas le bon jeu ?</button>` : ''}</p>${body}
+    <div class="m-actions"><button type="button" class="btn btn-ghost" data-sg-back>Retour</button></div>`);
+  let dlg = shell('<p class="small">Chargement…</p>');
+  $('[data-sg-back]', dlg).onclick = back;
+  let res;
+  try { res = await api.sgdbOptions(key, type, page); } catch (err) { dlg = shell(`<p class="small">${esc(cleanErr(err))}</p>`); $('[data-sg-back]', dlg).onclick = back; return; }
+  const items = [...prev, ...res.items];
+  dlg = shell(items.length
+    ? `<div class="sg-grid t-${type}">${items.map((x, i) => `<button type="button" class="sg-item" data-sg="${i}" title="${esc(`${x.width}×${x.height}${x.author ? ' · ' + x.author : ''}`)}"><img src="${esc(x.thumb)}" alt="" loading="lazy"><span>${x.width}×${x.height}</span></button>`).join('')}</div>${res.more ? '<button type="button" class="btn btn-ghost" data-sg-more>Voir plus</button>' : ''}`
+    : '<p class="small">Aucune proposition pour ce type de visuel.</p>', res.game);
+  $('[data-sg-back]', dlg).onclick = back;
+  const more = $('[data-sg-more]', dlg);
+  if (more) more.onclick = () => openSgdbPicker(key, type, page + 1, items);
+  $('[data-sg-wrong]', dlg).onclick = () => openSgdbGamePicker(key, type);
+  dlg.querySelectorAll('[data-sg]').forEach((b) => {
+    b.onclick = async () => {
+      dlg.querySelectorAll('[data-sg]').forEach((x) => { x.disabled = true; });
+      b.classList.add('busy');
+      try { await api.sgdbApply(key, type, items[+b.dataset.sg].url); toast('Visuel mis à jour'); await sync(true); openAssets(key); } catch (err) { toast(cleanErr(err)); openSgdbPicker(key, type, page, prev); }
+    };
+  });
+}
+// Choisir à la main le jeu SteamGridDB quand la recherche automatique se trompe
+function openSgdbGamePicker(key, type) {
+  const g = byId(key);
+  const dlg = modal(`<h2>Quel jeu sur SteamGridDB ?</h2>
+    <label class="field">Rechercher<input name="q" value="${esc(g.originalName || g.name)}" autofocus></label>
+    <div class="pick-list" id="sg-games"></div>
+    <div class="m-actions"><button type="button" class="btn btn-ghost" data-sg-back>Retour</button><button type="submit" class="btn btn-light">Rechercher</button></div>`);
+  const list = $('#sg-games', dlg);
+  const go = async () => {
+    list.textContent = 'Recherche…';
+    try {
+      const r = await api.sgdbSearch($('[name=q]', dlg).value);
+      list.innerHTML = r.length ? r.map((x) => `<div class="pick"><span class="path">${esc(x.name)}${x.year ? ` (${x.year})` : ''}</span><button type="button" class="btn btn-ghost" data-sg-game="${x.id}" data-name="${esc(x.name)}">Choisir</button></div>`).join('') : 'Aucun résultat';
+    } catch (err) { list.textContent = cleanErr(err); }
+  };
+  $('form', dlg).onsubmit = (e) => { e.preventDefault(); go(); };
+  $('[data-sg-back]', dlg).onclick = () => openSgdbPicker(key, type);
+  list.onclick = async (e) => { const b = e.target.closest('[data-sg-game]'); if (b) { await api.sgdbSetGame(key, +b.dataset.sgGame, b.dataset.name); openSgdbPicker(key, type); } };
+  go();
+}
+
+// ---------- Visuels personnalisés (jaquette, bannière, arrière-plan, logo) ----------
+// Chaque ligne = un type de visuel. Les sources en ligne (SteamGridDB…) viendront s'ajouter à côté de
+// « Choisir… » avec api.assetsSetUrl(key, type, url), qui enregistre l'image comme un fichier local.
+async function openAssets(key) {
+  const [info, prefs] = await Promise.all([api.assetsGet(key), api.getPrefs()]);
+  const g = byId(key);
+  const sg = !!prefs.hasSgdbKey;
+  const sgBtn = (attrs, label) => `<button type="button" class="btn btn-ghost" ${attrs} ${sg ? '' : 'disabled title="Ajoute ta clé API SteamGridDB dans Réglages › Général"'}>${label}</button>`;
+  const row = ([type, t]) => {
+    const url = info.art[type];
+    const custom = !!info.custom[type];
+    return `<div class="asset-row" data-type="${type}">
+      <div class="asset-thumb t-${type}">${url ? `<img src="${esc(url)}" alt="">` : '<span>Aucun</span>'}</div>
+      <div class="asset-info"><b>${esc(t.label)}</b>${custom ? '<span class="asset-badge">Perso</span>' : ''}<small>${esc(t.hint)}</small>
+        <div class="asset-btns"><button type="button" class="btn btn-ghost" data-asset-pick="${type}">Choisir…</button>${sgBtn(`data-asset-sgdb="${type}"`, 'SteamGridDB')}${custom ? `<button type="button" class="btn btn-ghost" data-asset-reset="${type}">Rétablir</button>` : ''}</div>
+      </div></div>`;
+  };
+  const dlg = modal(`<h2>Visuels du jeu</h2><p>${esc(g ? g.name : key)}</p>
+    <div class="asset-auto">${sgBtn('data-asset-auto', 'Remplir avec les plus populaires')}<small>${sg ? 'Récupère sur SteamGridDB le meilleur visuel de chaque type (les visuels déjà personnalisés sont conservés).' : 'Ajoute ta clé API SteamGridDB dans Réglages › Général pour choisir les visuels en ligne'}</small></div>
+    <div class="asset-list">${Object.entries(info.types).map(row).join('')}</div>
+    <div class="m-actions">${Object.keys(info.custom).length ? '<button type="button" class="btn btn-ghost" data-asset-reset-all>Tout rétablir</button>' : ''}<button type="button" class="btn btn-light" data-close>Fermer</button></div>`);
+  const refresh = async (msg) => { if (msg) toast(msg); await sync(true); if (dlg.open) { dlg.close(); await openAssets(key); } };
+  dlg.onclick = async (e) => {
+    const pick = e.target.closest('[data-asset-pick]');
+    const reset = e.target.closest('[data-asset-reset]');
+    try {
+      const sgdb = e.target.closest('[data-asset-sgdb]');
+      if (sgdb) return openSgdbPicker(key, sgdb.dataset.assetSgdb);
+      if (e.target.closest('[data-asset-auto]')) {
+        const btn = e.target.closest('[data-asset-auto]');
+        btn.disabled = true; btn.textContent = 'Recherche sur SteamGridDB…';
+        const r = await api.sgdbAuto(key);
+        const lab = (l) => l.map((t) => info.types[t].label.toLowerCase()).join(', ');
+        return refresh(r.done.length ? `Mis à jour : ${lab(r.done)}${r.missed.length ? ` · rien trouvé pour ${lab(r.missed)}` : ''}` : r.skipped.length === Object.keys(info.types).length ? 'Tous les visuels sont déjà personnalisés' : 'SteamGridDB n’a rien trouvé pour ce jeu');
+      }
+      if (pick) { if (await api.assetsPick(key, pick.dataset.assetPick)) await refresh('Visuel mis à jour'); }
+      else if (reset) { await api.assetsReset(key, reset.dataset.assetReset); await refresh('Visuel d’origine rétabli'); }
+      else if (e.target.closest('[data-asset-reset-all]')) { await api.assetsReset(key); await refresh('Visuels d’origine rétablis'); }
+    } catch (err) { toast(cleanErr(err)); if (dlg.open) openAssets(key); }
+  };
 }
 
 function openLaunchOpts(key) {
@@ -458,6 +565,12 @@ settingsSystem = function (prefs) {
     <input name="discordId" value="${esc(s.discordId && s.discordId !== s.discordAppIdDefault ? s.discordId : '')}" placeholder="Application CLRE-Launcher intégrée" inputmode="numeric">
     <small>Rien à régler : l’application Discord de CLRE-Launcher est intégrée, avec son logo. Tu peux mettre l’ID d’une autre application Discord si tu veux la tienne</small>
   </fieldset>
+  <fieldset class="field set"><legend>SteamGridDB</legend>
+    <div class="pick"><input name="sgdbKey" type="password" autocomplete="off" placeholder="${prefs.hasSgdbKey ? esc(prefs.sgdbKey) + ' (enregistrée)' : 'Colle ta clé API ici'}"><button type="button" class="btn btn-ghost" id="test-sgdb">Tester</button></div>
+    <label class="check"><input type="checkbox" name="sgdbNsfw" ${s.sgdbNsfw ? 'checked' : ''}> Autoriser les images pour adultes (NSFW)</label>
+    ${prefs.hasSgdbKey ? '<label class="check"><input type="checkbox" name="clearSgdbKey"> Supprimer la clé enregistrée</label>' : ''}
+    <small id="sgdb-status">Permet de choisir jaquettes, bannières, arrière-plans et logos sur SteamGridDB (Visuels du jeu). La clé est gratuite : steamgriddb.com › ton profil › Préférences › API</small>
+  </fieldset>
   <fieldset class="field set"><legend>Mises à jour du launcher</legend>
     <div class="pick"><input name="updateRepo" value="${esc(s.updateRepo || '')}" placeholder="propriétaire/depot sur GitHub"><button type="button" class="btn btn-ghost" id="check-update">Vérifier</button></div>
     <small id="update-status">Version installée : <span id="app-version"></span>. Le launcher cherche les nouvelles versions publiées sur ce dépôt</small>
@@ -516,6 +629,7 @@ function readExtraSettings(f) {
     crosshair: { enabled: !!f.get('ch_enabled'), style: crosshairStyle(f), games: (() => { try { return JSON.parse(f.get('ch_games') || '{}'); } catch { return {}; } })() },
     discordId: String(f.get('discordId') || '').replace(/\D/g, ''),
     discordEnabled: !!f.get('discordEnabled'),
+    sgdbNsfw: !!f.get('sgdbNsfw'),
     updateRepo: String(f.get('updateRepo') || '').trim(),
     backupDir: f.get('backupDir') || undefined,
     autoBackup: !!f.get('autoBackup'),
@@ -532,6 +646,16 @@ new MutationObserver(() => {
   $('#export-data', dlg).onclick = async () => { const p = await api.exportData(); if (p) toast('Données exportées'); };
   $('#import-data', dlg).onclick = async () => {
     try { const r = await api.importData(); if (r) { toast(`Import terminé · ${r.sessions} sessions`); state.local = { ...state.local, ...(await api.getLocal()) }; delete state.cache.sessions; dlg.close(); sync(true); } } catch (e) { toast(cleanErr(e)); }
+  };
+  $('#test-sgdb', dlg).onclick = async () => {
+    const st = $('#sgdb-status', dlg);
+    const typed = $('[name=sgdbKey]', dlg).value.trim();
+    st.textContent = 'Vérification…';
+    try {
+      if (typed) { await api.setPrefs({ sgdbKey: typed }); $('[name=sgdbKey]', dlg).value = ''; $('[name=sgdbKey]', dlg).placeholder = '•••• (enregistrée)'; }
+      await api.sgdbTest();
+      st.textContent = 'Clé valide : tu peux choisir tes visuels sur SteamGridDB';
+    } catch (e) { st.textContent = cleanErr(e); }
   };
   $('#check-update', dlg).onclick = async () => {
     const st = $('#update-status', dlg);
@@ -562,8 +686,8 @@ doAction = async function (act, id, el) {
       case 'reset-filters': state.local.filters = {}; saveLocal(); return render({ quiet: true });
       case 'launch-opts': return openLaunchOpts(id);
       case 'shortcut': { await api.createShortcut(id); return toast(`Raccourci « ${g.name} » créé sur le Bureau`); }
-      case 'cover': { if (await api.setCover(id)) { toast('Jaquette mise à jour'); await sync(true); } return; }
-      case 'cover-reset': { await api.resetCover(id); toast('Jaquette d’origine rétablie'); return sync(true); }
+      case 'assets': return openAssets(id);
+      case 'rename': return openRename(id);
       case 'hide': {
         const h = new Set(state.local.hidden || []);
         if (h.has(id)) { h.delete(id); toast(`${g.name} est de nouveau visible`); } else { h.add(id); toast(`${g.name} est masqué · retrouve-le dans « Jeux masqués »`); }

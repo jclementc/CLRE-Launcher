@@ -729,6 +729,8 @@ async function openSettings() {
     if (f.get('steamId')) patch.steamId = f.get('steamId');
     if (f.get('apiKey')) patch.apiKey = String(f.get('apiKey')).trim();
     if (f.get('clearKey')) patch.apiKey = null;
+    if (f.get('sgdbKey')) patch.sgdbKey = String(f.get('sgdbKey')).trim();
+    if (f.get('clearSgdbKey')) patch.sgdbKey = null;
     patch.system = { closeToTray: !!f.get('closeToTray'), shortcut: !!f.get('shortcut'), autostart: !!f.get('autostart') };
     patch.settings = readExtraSettings(f);
     await api.setPrefs(patch);

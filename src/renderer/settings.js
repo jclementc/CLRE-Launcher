@@ -22,6 +22,7 @@ const ROW_TITLES = [
   [(el) => el.id === 'ch-games', 'S’affiche tout seul dans'],
   [(el) => el.querySelector('#backup-dir'), 'Dossier des copies'],
   [(el) => el.querySelector('[name="updateRepo"]'), 'Dépôt GitHub'],
+  [(el) => el.querySelector('[name="sgdbKey"]'), 'Clé API'],
   [(el) => el.querySelector('#pm-path'), 'PresentMon (FPS)'],
   [(el) => el.querySelector('#export-data'), 'Tes données'],
   [(el) => el.matches('input[name="discordId"]'), 'Application Discord'],

@@ -129,6 +129,8 @@ function autoSavePrefs(form, now) {
     if (f.get('steamId') && state.lib && f.get('steamId') !== state.lib.user.id64) { patch.steamId = f.get('steamId'); resync = true; }
     if (f.get('apiKey')) { patch.apiKey = String(f.get('apiKey')).trim(); resync = true; form.querySelector('[name="apiKey"]').value = ''; }
     if (f.get('clearKey')) { patch.apiKey = null; resync = true; }
+    if (f.get('sgdbKey')) { patch.sgdbKey = String(f.get('sgdbKey')).trim(); form.querySelector('[name="sgdbKey"]').value = ''; }
+    if (f.get('clearSgdbKey')) patch.sgdbKey = null;
     await api.setPrefs(patch);
     if (state.prefs) state.prefs.settings = { ...(state.prefs.settings || {}), ...patch.settings };
     if (typeof applyLook === 'function') applyLook();

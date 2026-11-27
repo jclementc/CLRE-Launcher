@@ -46,7 +46,7 @@ class Saves {
     if (this.indexing) return this.indexing;
     this.indexing = (async () => {
       await this.ensureManifest();
-      const list = games.map((g) => ({ key: g.key, name: g.name, steamId: g.store === 'steam' ? g.appid : g.steamAppId, gogId: g.store === 'gog' ? g.platformId : null }));
+      const list = games.map((g) => ({ key: g.key, name: g.originalName || g.name, steamId: g.store === 'steam' ? g.appid : g.steamAppId, gogId: g.store === 'gog' ? g.platformId : null }));
       const data = await new Promise((resolve, reject) => {
         // Dans l'exe, le worker est sorti de l'archive asar (asarUnpack)
         const workerFile = path.join(__dirname, 'saves-worker.js').replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep);
@@ -113,7 +113,7 @@ class Saves {
     return { known: true, name: e.name, cloud: !!(e.cloud && (e.cloud.steam || e.cloud.epic || e.cloud.gog)), registry: e.registry, paths, total: paths.reduce((s, x) => s + x.size, 0) };
   }
 
-  gameDir(g) { return path.join(this.getBackupDir(), safe(g.name)); }
+  gameDir(g) { return path.join(this.getBackupDir(), safe(g.originalName || g.name)); } // nom d'origine : renommer un jeu ne doit pas orpheliner ses sauvegardes
 
   list(g) {
     const dir = this.gameDir(g);

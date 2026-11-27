@@ -142,7 +142,7 @@ async function resolveArt(games, cache) {
   for (const g of games) {
     if (cache[g.key]) continue;
     try {
-      cache[g.key] = (g.store === 'gog' ? await gogArt(g.platformId) : null) || (await steamArtByName(g.name)) || { art: {} };
+      cache[g.key] = (g.store === 'gog' ? await gogArt(g.platformId) : null) || (await steamArtByName(g.originalName || g.name)) || { art: {} };
       changed = true;
     } catch { /* hors ligne : on réessaiera au prochain lancement */ }
   }

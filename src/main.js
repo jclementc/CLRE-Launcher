@@ -27,6 +27,8 @@ const { workshopMods } = require('./workshop');
 const { Saves } = require('./saves');
 const sys = require('./system');
 const { Themes } = require('./themes');
+const { Assets, ASSET_TYPES } = require('./assets');
+const { SteamGridDb, isSgdbImage, KINDS: SGDB_KINDS } = require('./sgdb');
 
 // Le nom d'app a changé (Launcher → CLRE-Launcher) : on garde l'ancien dossier de données
 // pour conserver la clé API, les favoris et le temps de jeu déjà mesuré.
@@ -119,6 +121,7 @@ const settings = () => {
     discordId: s.discordId || '', // ID perso (facultatif) ; vide = celui intégré à l'app
     discordAppId: s.discordId || DISCORD_APP_ID,
     discordAppIdDefault: DISCORD_APP_ID,
+    sgdbNsfw: s.sgdbNsfw === true, // SteamGridDB : inclure les images pour adultes (désactivé par défaut)
     discordEnabled: s.discordEnabled !== false,
     discordBrowse: s.discordBrowse !== false,
     updateRepo: s.updateRepo || '',
@@ -141,6 +144,8 @@ let sessions;
 let saves;
 let gog = null;
 let epicDl = null;
+let sgdb = null; // SteamGridDB (sgdb.js)
+let assets = null; // visuels personnalisés (assets.js)
 const discord = new sys.Discord();
 const POLL_MS = 5000;
 
@@ -248,9 +253,12 @@ async function sync(fresh) {
 
   const all = dedupeStores([...lib.games, ...epic.games, ...others]);
   if (steamError && !all.length) throw new Error(steamError);
-  // Jaquettes choisies à la main
-  const covers = prefs.coverOverrides || {};
-  for (const g of all) if (covers[g.key]) { g.art = { ...g.art, cover: covers[g.key] }; g.coverCustom = true; }
+  // Jeux renommés : seul le nom affiché change. La clé (collections, temps de jeu, succès…) reste la même
+  // et le nom d'origine (originalName) sert à tout ce qui retrouve le jeu par son nom (sauvegardes, recherches).
+  const renames = prefs.nameOverrides || {};
+  for (const g of all) if (typeof renames[g.key] === 'string' && renames[g.key]) { g.originalName = g.name; g.name = renames[g.key]; g.renamed = true; }
+  // Visuels choisis à la main (jaquette, bannière, arrière-plan, logo)
+  if (assets) assets.apply(all);
   // Mise à jour disponible pour un jeu marqué « En cours »
   const status = (prefs.local && prefs.local.status) || {};
   for (const g of all) {
@@ -456,7 +464,7 @@ function pollDownloads(force) {
 // ---------- Veille en arrière-plan : promos de la liste de souhaits, amis ----------
 const notifiedUpdates = new Set();
 const normName = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
-function ownsByName(name) { const n = normName(name); return [...games.values()].some((g) => normName(g.name) === n); }
+function ownsByName(name) { const n = normName(name); return [...games.values()].some((g) => normName(g.originalName || g.name) === n); }
 async function checkEpicFree() {
   try {
     const list = (await gameinfo.epicFree()).filter((x) => x.now && !ownsByName(x.name));
@@ -551,7 +559,7 @@ function action(key, kind) {
   const g = games.get(String(key));
   if (!g) return;
   const open = (uri) => shell.openExternal(uri);
-  const search = (site) => open(site + encodeURIComponent(g.name));
+  const search = (site) => open(site + encodeURIComponent(g.originalName || g.name));
   const extra = kind === 'play' ? beforeLaunch(g.key) : '';
   switch (g.store) {
     case 'epic':
@@ -591,7 +599,7 @@ function action(key, kind) {
       if (kind === 'store') return search('https://www.ea.com/fr-fr/games/library?q=');
       return open(`origin2://game/launch?offerIds=${encodeURIComponent(g.platformId)}`);
     case 'xbox':
-      if (kind === 'store') return open(g.storeId ? `ms-windows-store://pdp/?productid=${g.storeId}` : `ms-windows-store://search/?query=${encodeURIComponent(g.name)}`);
+      if (kind === 'store') return open(g.storeId ? `ms-windows-store://pdp/?productid=${g.storeId}` : `ms-windows-store://search/?query=${encodeURIComponent(g.originalName || g.name)}`);
       if (kind === 'play') return spawn('explorer.exe', ['shell:AppsFolder\\' + g.aumid], { detached: true, stdio: 'ignore' }).unref();
       return open('xbox://');
     case 'battlenet':
@@ -867,6 +875,8 @@ app.whenReady().then(() => {
   setInterval(checkRecaps, 6 * 3600 * 1000);
   saves = new Saves({ dataDir: app.getPath('userData'), documents: app.getPath('documents'), getBackupDir: () => settings().backupDir });
   const coversDir = dataFile('covers');
+  assets = new Assets({ dir: coversDir, readPrefs, writePrefs });
+  sgdb = new SteamGridDb({ getKey: () => readPrefs().sgdbKey || '', getNsfw: () => settings().sgdbNsfw, cacheFile: dataFile('sgdb-games.json') });
   gog = new Gog({
     dataDir: app.getPath('userData'),
     getDir: () => settings().gogDir,
@@ -1074,7 +1084,7 @@ app.whenReady().then(() => {
     const g = games.get(String(key));
     if (!g) return null;
     howLong = howLong || new gameinfo.HowLong(dataFile('hltb.json'));
-    try { return await howLong.get(g.key, g.name); } catch (e) { return { error: e.message }; }
+    try { return await howLong.get(g.key, g.originalName || g.name); } catch (e) { return { error: e.message }; }
   });
   ipcMain.handle('friends', async () => {
     try { return await extras.friends(prefs().apiKey, lib && lib.user.id64); } catch (e) { return { error: e.message }; }
@@ -1194,18 +1204,75 @@ app.whenReady().then(() => {
     writePrefs(p);
     return true;
   });
-  ipcMain.handle('cover:set', async (_e, key) => {
-    const r = await pickPath('image', { title: 'Choisir une jaquette (format portrait)', properties: ['openFile'], filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }] });
-    if (r.canceled) return null;
-    fs.mkdirSync(coversDir, { recursive: true });
-    const dest = path.join(coversDir, `cover-${String(key).replace(/[^\w-]/g, '_')}-${Date.now().toString(36)}${path.extname(r.filePaths[0]).toLowerCase()}`);
-    fs.copyFileSync(r.filePaths[0], dest);
+  // Visuels personnalisés. `type` : cover | header | hero | logo (voir assets.js)
+  const gameKey = (key) => { key = String(key); if (!games.has(key)) throw new Error('Jeu introuvable'); return key; };
+  // Renommer un jeu : nom vide (ou identique à l'original) = nom d'origine rétabli
+  ipcMain.handle('name:set', (_e, key, name) => {
+    const g = games.get(String(key));
+    if (!g) throw new Error('Jeu introuvable');
+    const clean = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 100);
     const p = readPrefs();
-    p.coverOverrides = { ...(p.coverOverrides || {}), [key]: 'steamart://local/' + encodeURIComponent(dest) };
+    p.nameOverrides = p.nameOverrides || {};
+    if (!clean || clean === (g.originalName || g.name)) delete p.nameOverrides[g.key]; else p.nameOverrides[g.key] = clean;
+    if (!Object.keys(p.nameOverrides).length) delete p.nameOverrides;
     writePrefs(p);
     return true;
   });
-  ipcMain.handle('cover:reset', (_e, key) => { const p = readPrefs(); if (p.coverOverrides) delete p.coverOverrides[key]; writePrefs(p); return true; });
+  // ---------- SteamGridDB : propositions de visuels, remplissage automatique ----------
+  const sgdbGame = (key) => games.get(gameKey(key));
+  ipcMain.handle('sgdb:test', () => sgdb.test());
+  ipcMain.handle('sgdb:search', (_e, term) => sgdb.search(term));
+  // Corrige le jeu SteamGridDB associé quand la détection se trompe
+  ipcMain.handle('sgdb:set-game', (_e, key, id, name) => {
+    if (!Number.isInteger(id)) throw new Error('Jeu invalide');
+    sgdb.remember(gameKey(key), { id, name: String(name || '').slice(0, 200) });
+    return true;
+  });
+  ipcMain.handle('sgdb:options', (_e, key, type, page) => sgdb.options(sgdbGame(key), type, Math.max(0, Number(page) || 0)));
+  ipcMain.handle('sgdb:apply', async (_e, key, type, url) => {
+    if (!isSgdbImage(url)) throw new Error('Image refusée : adresse inattendue');
+    await assets.setFromUrl(gameKey(key), type, url);
+    return true;
+  });
+  // L'option la plus populaire pour chaque visuel. Les visuels déjà personnalisés sont conservés.
+  ipcMain.handle('sgdb:auto', async (_e, key) => {
+    const g = sgdbGame(key);
+    const have = (games.get(g.key).artCustom) || {};
+    const done = [];
+    const missed = [];
+    const byPath = {}; // heroes sert à la fois pour la bannière et l'arrière-plan : une seule requête
+    for (const type of Object.keys(SGDB_KINDS)) {
+      if (have[type]) continue;
+      const p = SGDB_KINDS[type].path;
+      try {
+        byPath[p] = byPath[p] || (await sgdb.options(g, type)).items;
+        const top = byPath[p][0];
+        if (!top) { missed.push(type); continue; }
+        await assets.setFromUrl(g.key, type, top.url);
+        done.push(type);
+      } catch (e) {
+        if (!done.length && !missed.length && !byPath[p]) throw e; // clé refusée, hors ligne, jeu introuvable : on le dit
+        missed.push(type);
+      }
+    }
+    return { done, missed, skipped: Object.keys(have) };
+  });
+  ipcMain.handle('assets:types', () => ASSET_TYPES);
+  ipcMain.handle('assets:get', (_e, key) => {
+    const g = games.get(String(key));
+    return { types: ASSET_TYPES, art: g ? g.art : {}, custom: g ? g.artCustom || {} : {} };
+  });
+  ipcMain.handle('assets:pick', async (_e, key, type) => {
+    key = gameKey(key);
+    if (!Assets.isType(type)) throw new Error('Type de visuel inconnu');
+    const r = await pickPath('image', { title: `Choisir : ${ASSET_TYPES[type].label.toLowerCase()}`, properties: ['openFile'], filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif'] }] });
+    if (r.canceled) return false;
+    assets.setFromPath(key, type, r.filePaths[0]);
+    return true;
+  });
+  // Image à une adresse https (sera utilisé par les sources en ligne)
+  ipcMain.handle('assets:set-url', async (_e, key, type, url) => { await assets.setFromUrl(gameKey(key), type, url); return true; });
+  ipcMain.handle('assets:reset', (_e, key, type) => assets.reset(gameKey(key), type || undefined));
 
   // ---------- Récap : export de la carte en image ----------
   // ---------- Magasin Steam ----------
@@ -1378,16 +1445,16 @@ app.whenReady().then(() => {
 
   ipcMain.handle('prefs:get', () => {
     const p = readPrefs();
-    return { steamId: p.steamId, apiKey: p.apiKey ? '••••' + p.apiKey.slice(-4) : '', hasApiKey: !!p.apiKey, system: system(), settings: settings(), canAutostart: app.isPackaged };
+    return { steamId: p.steamId, apiKey: p.apiKey ? '••••' + p.apiKey.slice(-4) : '', hasApiKey: !!p.apiKey, sgdbKey: p.sgdbKey ? '••••' + p.sgdbKey.slice(-4) : '', hasSgdbKey: !!p.sgdbKey, system: system(), settings: settings(), canAutostart: app.isPackaged };
   });
   ipcMain.handle('prefs:set', (_e, patch) => {
     const p = readPrefs();
     for (const [k, v] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
       if ((k === 'system' || k === 'settings') && (!v || typeof v !== 'object' || Array.isArray(v))) continue;
-      if ((k === 'apiKey' || k === 'steamId') && v !== null && typeof v !== 'string') continue;
+      if ((k === 'apiKey' || k === 'steamId' || k === 'sgdbKey') && v !== null && typeof v !== 'string') continue;
       if (k === 'system') { p.system = { ...system(), ...v }; continue; }
       if (k === 'settings') { p.settings = { ...(p.settings || {}), ...v, notify: { ...((p.settings || {}).notify || {}), ...(v.notify || {}) }, overlay: { ...((p.settings || {}).overlay || {}), ...(v.overlay || {}) }, crosshair: { ...((p.settings || {}).crosshair || {}), ...(v.crosshair || {}) } }; continue; }
-      if (!['apiKey', 'steamId'].includes(k)) continue;
+      if (!['apiKey', 'steamId', 'sgdbKey'].includes(k)) continue;
       if (v === null || v === '') delete p[k]; else p[k] = v;
     }
     writePrefs(p);
